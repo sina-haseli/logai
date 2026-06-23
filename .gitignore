@@ -1,0 +1,8 @@
+/bin/
+*.exe
+e2e/mockgitlab/mockgitlab
+*.db
+*.db-wal
+*.db-shm
+.env
+e2e/secrets.env

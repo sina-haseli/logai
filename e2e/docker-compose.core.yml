@@ -1,0 +1,57 @@
+# Slim stack: everything except OpenSearch.
+# Exercises the webhook -> triage -> localize -> fix -> GitLab MR pipeline.
+# The OpenSearch poller still runs inside logai but just logs retry warnings
+# (OPENSEARCH_URL points at an unused host); it does not block the webhook path.
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  mock-gitlab:
+    build:
+      context: ./mockgitlab
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  logai:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+      mock-gitlab:
+        condition: service_healthy
+    env_file:
+      - ./secrets.env
+    environment:
+      GITLAB_URL: http://mock-gitlab:8080
+      GITLAB_TOKEN: test-token
+      GITLAB_PROJECT_ID: "42"
+      GITLAB_DEFAULT_BRANCH: main
+      GITLAB_MR_TARGET_BRANCH: main
+      OPENSEARCH_URL: http://opensearch-disabled:9200
+      OPENSEARCH_USERNAME: admin
+      OPENSEARCH_PASSWORD: admin
+      OPENSEARCH_INDEX: "logs-*"
+      OPENSEARCH_POLL_INTERVAL_SECONDS: "3600"
+      OPENSEARCH_LOOKBACK_SECONDS: "3600"
+      REDIS_URL: redis://redis:6379
+      PORT: "3000"
+      HUMAN_APPROVAL_REQUIRED: "true"
+      LOG_LEVEL: info
+      DB_PATH: /tmp/logai.db
+    ports:
+      - "3000:3000"

@@ -1,0 +1,87 @@
+# Local end-to-end stack for logai.
+#
+#   redis        - Asynq job queue
+#   opensearch   - error source (security disabled for local testing)
+#   mock-gitlab  - in-memory stand-in for self-hosted GitLab
+#   logai        - the application under test (AI via avalai gateway)
+#
+# Usage:  docker compose -f e2e/docker-compose.yml up --build
+# Secrets (Anthropic/avalai key) come from e2e/secrets.env.
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    environment:
+      - discovery.type=single-node
+      - DISABLE_SECURITY_PLUGIN=true
+      - DISABLE_INSTALL_DEMO_CONFIG=true
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+
+  mock-gitlab:
+    build:
+      context: ./mockgitlab
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  logai:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      mock-gitlab:
+        condition: service_healthy
+    env_file:
+      - ./secrets.env
+    environment:
+      GITLAB_URL: http://mock-gitlab:8080
+      GITLAB_TOKEN: test-token
+      GITLAB_PROJECT_ID: "42"
+      GITLAB_DEFAULT_BRANCH: main
+      GITLAB_MR_TARGET_BRANCH: main
+      OPENSEARCH_URL: http://opensearch:9200
+      OPENSEARCH_USERNAME: admin
+      OPENSEARCH_PASSWORD: admin
+      OPENSEARCH_INDEX: "logs-*"
+      OPENSEARCH_POLL_INTERVAL_SECONDS: "15"
+      OPENSEARCH_LOOKBACK_SECONDS: "3600"
+      REDIS_URL: redis://redis:6379
+      PORT: "3000"
+      HUMAN_APPROVAL_REQUIRED: "true"
+      LOG_LEVEL: info
+      DB_PATH: /tmp/logai.db
+    ports:
+      - "3000:3000"
