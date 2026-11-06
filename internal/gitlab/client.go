@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -104,10 +106,70 @@ func (c *Client) GetFileContent(ctx context.Context, filePath, ref string) (stri
 	if err != nil {
 		return "", fmt.Errorf("gitlab: get file content: %w", err)
 	}
+	if status == http.StatusNotFound {
+		return "", fmt.Errorf("%w: %s@%s", ErrFileNotFound, filePath, ref)
+	}
 	if status != http.StatusOK {
 		return "", fmt.Errorf("gitlab: get file content: status %d: %s", status, excerpt(raw))
 	}
 	return string(raw), nil
+}
+
+// ErrFileNotFound is returned when no candidate path exists in the repository.
+var ErrFileNotFound = errors.New("gitlab: file not found in repository")
+
+// maxPathCandidates bounds how many path suffixes ResolveFile will try.
+const maxPathCandidates = 6
+
+// PathCandidates turns a path as it appears in a stack trace (often absolute
+// and container-specific, e.g. "/app/src/pkg/handler.go" or
+// "C:\build\pkg\handler.go") into repository-relative candidates, longest
+// first: "app/src/pkg/handler.go", "src/pkg/handler.go", "pkg/handler.go", ...
+// The bare file name is never tried alone, since it would be ambiguous.
+func PathCandidates(p string) []string {
+	p = strings.ReplaceAll(strings.TrimSpace(p), `\`, "/")
+	// Drop a Windows drive letter ("C:/...").
+	if len(p) >= 2 && p[1] == ':' {
+		p = p[2:]
+	}
+	var parts []string
+	for _, seg := range strings.Split(p, "/") {
+		if seg != "" && seg != "." {
+			parts = append(parts, seg)
+		}
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	if len(parts) == 1 {
+		return []string{parts[0]}
+	}
+
+	var out []string
+	for i := 0; i < len(parts)-1 && len(out) < maxPathCandidates; i++ {
+		out = append(out, strings.Join(parts[i:], "/"))
+	}
+	return out
+}
+
+// ResolveFile finds the repository path for a (possibly absolute) stack-trace
+// path by trying each candidate from PathCandidates, and returns the resolved
+// path together with the file content. Returns ErrFileNotFound if none exist.
+func (c *Client) ResolveFile(ctx context.Context, filePath, ref string) (string, string, error) {
+	candidates := PathCandidates(filePath)
+	for _, cand := range candidates {
+		content, err := c.GetFileContent(ctx, cand, ref)
+		if err == nil {
+			if cand != filePath {
+				c.logger.Info("gitlab resolved file path", "requested", filePath, "resolved", cand)
+			}
+			return cand, content, nil
+		}
+		if !errors.Is(err, ErrFileNotFound) {
+			return "", "", err
+		}
+	}
+	return "", "", fmt.Errorf("%w: %q (tried %v)", ErrFileNotFound, filePath, candidates)
 }
 
 // CreateBranch creates a new branch from ref.

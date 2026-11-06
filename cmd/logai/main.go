@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,12 +17,12 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/hibiken/asynq"
 
-	"github.com/yourorg/logai/internal/anthropic"
 	"github.com/yourorg/logai/internal/api"
 	"github.com/yourorg/logai/internal/config"
 	"github.com/yourorg/logai/internal/db"
 	"github.com/yourorg/logai/internal/gitlab"
 	"github.com/yourorg/logai/internal/ingestion"
+	"github.com/yourorg/logai/internal/llm"
 	"github.com/yourorg/logai/internal/pipeline"
 )
 
@@ -75,8 +76,8 @@ func run(migrateOnly bool) error {
 	// --- Redis / Asynq connection ---
 	redisOpt, err := asynq.ParseRedisURI(cfg.RedisURL)
 	if err != nil {
-		logger.Error("invalid REDIS_URL", "err", err)
-		os.Exit(1)
+		// Return (not os.Exit) so deferred cleanup such as closing the DB runs.
+		return fmt.Errorf("invalid REDIS_URL: %w", err)
 	}
 
 	asynqClient := asynq.NewClient(redisOpt)
@@ -86,11 +87,20 @@ func run(migrateOnly bool) error {
 	defer inspector.Close()
 
 	// --- Reusable clients ---
-	anthropicClient := anthropic.New(cfg.AnthropicAPIKey, cfg.AnthropicBaseURL, logger)
+	llmClient := llm.New(llm.Options{
+		Provider:        cfg.LLMProvider,
+		BaseURL:         cfg.LLMBaseURL,
+		APIKey:          cfg.LLMAPIKey,
+		Model:           cfg.LLMModel,
+		ReasoningEffort: cfg.LLMReasoningEffort,
+		Logger:          logger,
+	})
+	logger.Info("llm configured", "provider", cfg.LLMProvider, "base_url", cfg.LLMBaseURL,
+		"model", cfg.LLMModel, "reasoning_effort", cfg.LLMReasoningEffort)
 	gitlabClient := gitlab.New(cfg.GitLabURL, cfg.GitLabToken, cfg.GitLabProjectID, logger)
 
 	// --- Pipeline worker ---
-	processor := pipeline.NewProcessor(database, anthropicClient, gitlabClient, cfg, logger)
+	processor := pipeline.NewProcessor(database, llmClient, gitlabClient, cfg, logger)
 
 	asynqServer := asynq.NewServer(redisOpt, asynq.Config{
 		Concurrency: pipeline.WorkerConcurrency,
@@ -125,7 +135,10 @@ func run(migrateOnly bool) error {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
-	r.Post("/webhook/error", ingestor.WebhookHandler())
+	r.Post("/webhook/error", ingestor.WebhookHandler(cfg.WebhookSecret))
+	if cfg.WebhookSecret == "" {
+		logger.Warn("WEBHOOK_SECRET is not set: POST /webhook/error accepts unauthenticated requests")
+	}
 	apiHandlers.RegisterRoutes(r)
 
 	httpServer := &http.Server{
