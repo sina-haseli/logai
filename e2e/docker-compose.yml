@@ -3,10 +3,10 @@
 #   redis        - Asynq job queue
 #   opensearch   - error source (security disabled for local testing)
 #   mock-gitlab  - in-memory stand-in for self-hosted GitLab
-#   logai        - the application under test (AI via avalai gateway)
+#   logai        - the application under test (AI via OpenRouter)
 #
 # Usage:  docker compose -f e2e/docker-compose.yml up --build
-# Secrets (Anthropic/avalai key) come from e2e/secrets.env.
+# Secrets (LLM_API_KEY for OpenRouter) come from e2e/secrets.env.
 
 services:
   redis:
@@ -67,6 +67,8 @@ services:
     env_file:
       - ./secrets.env
     environment:
+      LLM_PROVIDER: openrouter
+      LLM_MODEL: anthropic/claude-sonnet-5.5
       GITLAB_URL: http://mock-gitlab:8080
       GITLAB_TOKEN: test-token
       GITLAB_PROJECT_ID: "42"

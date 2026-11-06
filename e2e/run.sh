@@ -10,6 +10,15 @@ COMPOSE="docker compose -f docker-compose.yml"
 KEEP=0
 [[ "${1:-}" == "--keep" ]] && KEEP=1
 
+if ! docker info >/dev/null 2>&1; then
+  echo "ERROR: Docker engine is not reachable. Start Docker Desktop (or the docker daemon) and retry." >&2
+  exit 1
+fi
+if ! grep -qE '^LLM_API_KEY=.+' secrets.env 2>/dev/null; then
+  echo "ERROR: e2e/secrets.env must define LLM_API_KEY=<your OpenRouter key>." >&2
+  exit 1
+fi
+
 cleanup() {
   if [[ $KEEP -eq 0 ]]; then
     echo "=== Tearing down stack ==="

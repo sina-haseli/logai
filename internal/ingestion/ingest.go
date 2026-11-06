@@ -18,16 +18,21 @@ import (
 	"github.com/yourorg/logai/internal/pipeline"
 )
 
+// Enqueuer is the subset of *asynq.Client the ingestor needs.
+type Enqueuer interface {
+	EnqueueContext(ctx context.Context, task *asynq.Task, opts ...asynq.Option) (*asynq.TaskInfo, error)
+}
+
 // Ingestor persists incoming errors (with dedup) and enqueues pipeline tasks.
 // It is shared by every ingestion source.
 type Ingestor struct {
 	DB    *db.DB
-	Asynq *asynq.Client
+	Asynq Enqueuer
 	Log   *slog.Logger
 }
 
 // NewIngestor constructs an Ingestor.
-func NewIngestor(database *db.DB, client *asynq.Client, logger *slog.Logger) *Ingestor {
+func NewIngestor(database *db.DB, client Enqueuer, logger *slog.Logger) *Ingestor {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -79,7 +84,12 @@ func (i *Ingestor) Ingest(ctx context.Context, source string, in models.Incoming
 	if err != nil {
 		return "", fmt.Errorf("ingest: build task: %w", err)
 	}
-	if _, err := i.Asynq.EnqueueContext(ctx, task, asynq.MaxRetry(3)); err != nil {
+	if _, err := i.Asynq.EnqueueContext(ctx, task, asynq.MaxRetry(pipeline.MaxRetry)); err != nil {
+		// The row exists but nothing will process it, and dedup would block a
+		// re-ingest. Mark it failed so it is visible and POST /retry recovers it.
+		if uerr := i.DB.UpdateErrorStatus(context.WithoutCancel(ctx), id, models.StatusFailed); uerr != nil {
+			i.Log.Error("ingest: mark unqueued error failed", "error_id", id, "err", uerr)
+		}
 		return "", fmt.Errorf("ingest: enqueue task: %w", err)
 	}
 

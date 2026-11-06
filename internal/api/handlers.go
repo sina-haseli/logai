@@ -52,14 +52,19 @@ func (a *API) health(w http.ResponseWriter, r *http.Request) {
 	resp["db"] = dbStatus
 
 	queued := 0
+	redisStatus := "ok"
 	if queues, err := a.Inspector.Queues(); err == nil {
 		for _, q := range queues {
 			if info, err := a.Inspector.GetQueueInfo(q); err == nil {
 				queued += info.Pending + info.Active + info.Scheduled + info.Retry
 			}
 		}
+	} else {
+		redisStatus = "error"
+		resp["status"] = "degraded"
 	}
 	resp["asynq_queued"] = queued
+	resp["redis"] = redisStatus
 
 	status := http.StatusOK
 	if resp["status"] != "ok" {
@@ -143,12 +148,18 @@ func (a *API) retry(w http.ResponseWriter, r *http.Request) {
 	errorID := chi.URLParam(r, "errorId")
 
 	// Confirm the error exists before resetting it.
-	if _, err := a.DB.GetError(r.Context(), errorID); err != nil {
+	e, err := a.DB.GetError(r.Context(), errorID)
+	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "error not found"})
 			return
 		}
 		a.serverError(w, "retry get error", err)
+		return
+	}
+	// A second concurrent run would race the first and could open two MRs.
+	if e.Status == models.StatusProcessing {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "error is currently being processed"})
 		return
 	}
 
@@ -162,7 +173,7 @@ func (a *API) retry(w http.ResponseWriter, r *http.Request) {
 		a.serverError(w, "retry build task", err)
 		return
 	}
-	if _, err := a.Asynq.EnqueueContext(r.Context(), task, asynq.MaxRetry(3)); err != nil {
+	if _, err := a.Asynq.EnqueueContext(r.Context(), task, asynq.MaxRetry(pipeline.MaxRetry)); err != nil {
 		a.serverError(w, "retry enqueue", err)
 		return
 	}
@@ -201,6 +212,9 @@ func (a *API) serverError(w http.ResponseWriter, op string, err error) {
 	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
 }
 
+// maxPageSize caps ?limit= so one request can't dump the whole table.
+const maxPageSize = 500
+
 func queryInt(r *http.Request, key string, def int) int {
 	v := r.URL.Query().Get(key)
 	if v == "" {
@@ -209,6 +223,9 @@ func queryInt(r *http.Request, key string, def int) int {
 	n, err := strconv.Atoi(v)
 	if err != nil || n < 0 {
 		return def
+	}
+	if key == "limit" && n > maxPageSize {
+		return maxPageSize
 	}
 	return n
 }

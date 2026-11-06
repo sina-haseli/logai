@@ -78,7 +78,7 @@ type MergeRequest struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
-// --- Claude structured outputs ---
+// --- LLM structured outputs ---
 
 // TriageResult is the strict JSON shape returned by the triage stage.
 type TriageResult struct {

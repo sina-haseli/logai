@@ -37,6 +37,8 @@ services:
     env_file:
       - ./secrets.env
     environment:
+      LLM_PROVIDER: openrouter
+      LLM_MODEL: anthropic/claude-sonnet-5.5
       GITLAB_URL: http://mock-gitlab:8080
       GITLAB_TOKEN: test-token
       GITLAB_PROJECT_ID: "42"

@@ -7,13 +7,18 @@ import (
 	"strings"
 
 	"github.com/joho/godotenv"
+
+	"github.com/yourorg/logai/internal/llm"
 )
 
 // Config holds all runtime configuration loaded from the environment.
 type Config struct {
-	// Anthropic
-	AnthropicAPIKey  string
-	AnthropicBaseURL string
+	// LLM (OpenAI-compatible chat completions: OpenRouter, avalai, custom)
+	LLMProvider        string
+	LLMAPIKey          string
+	LLMBaseURL         string
+	LLMModel           string
+	LLMReasoningEffort string
 
 	// GitLab
 	GitLabURL           string
@@ -31,6 +36,15 @@ type Config struct {
 	OpenSearchPollInterval int
 	OpenSearchLookback     int
 
+	// OpenSearch document field mapping. Dotted paths (e.g. "log.level") are
+	// supported so ECS-style nested documents work out of the box.
+	OpenSearchLevelField      string
+	OpenSearchLevelValue      string
+	OpenSearchMessageField    string
+	OpenSearchStackTraceField string
+	OpenSearchServiceField    string
+	OpenSearchTimestampField  string
+
 	// Redis
 	RedisURL string
 
@@ -38,6 +52,10 @@ type Config struct {
 	Port                  string
 	HumanApprovalRequired bool
 	LogLevel              string
+
+	// WebhookSecret, when set, must be presented by webhook callers via the
+	// X-Logai-Token header or "Authorization: Bearer <secret>".
+	WebhookSecret string
 
 	// DBPath is where the SQLite file lives (not in the spec env list; sensible default).
 	DBPath string
@@ -69,8 +87,9 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		AnthropicAPIKey:  required("ANTHROPIC_API_KEY"),
-		AnthropicBaseURL: optional("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
+		LLMProvider:        strings.ToLower(optional("LLM_PROVIDER", llm.ProviderOpenRouter)),
+		LLMAPIKey:          required("LLM_API_KEY"),
+		LLMReasoningEffort: strings.ToLower(optional("LLM_REASONING_EFFORT", "medium")),
 
 		GitLabURL:           strings.TrimRight(required("GITLAB_URL"), "/"),
 		GitLabToken:         required("GITLAB_TOKEN"),
@@ -83,11 +102,40 @@ func Load() (*Config, error) {
 		OpenSearchPassword: required("OPENSEARCH_PASSWORD"),
 		OpenSearchIndex:    optional("OPENSEARCH_INDEX", "logs-*"),
 
+		OpenSearchLevelField:      optional("OPENSEARCH_LEVEL_FIELD", "level"),
+		OpenSearchLevelValue:      optional("OPENSEARCH_LEVEL_VALUE", "ERROR"),
+		OpenSearchMessageField:    optional("OPENSEARCH_MESSAGE_FIELD", "message"),
+		OpenSearchStackTraceField: optional("OPENSEARCH_STACK_TRACE_FIELD", "stack_trace"),
+		OpenSearchServiceField:    optional("OPENSEARCH_SERVICE_FIELD", "service"),
+		OpenSearchTimestampField:  optional("OPENSEARCH_TIMESTAMP_FIELD", "@timestamp"),
+
 		RedisURL: optional("REDIS_URL", "redis://localhost:6379"),
 
-		Port:     optional("PORT", "3000"),
-		LogLevel: optional("LOG_LEVEL", "info"),
-		DBPath:   optional("DB_PATH", "logai.db"),
+		Port:          optional("PORT", "3000"),
+		LogLevel:      optional("LOG_LEVEL", "info"),
+		DBPath:        optional("DB_PATH", "logai.db"),
+		WebhookSecret: optional("WEBHOOK_SECRET", ""),
+	}
+
+	// LLM provider presets; explicit LLM_BASE_URL / LLM_MODEL always win.
+	defBaseURL, defModel, ok := llm.ProviderDefaults(cfg.LLMProvider)
+	if !ok {
+		return nil, fmt.Errorf("config: LLM_PROVIDER must be one of openrouter, avalai, custom (got %q)", cfg.LLMProvider)
+	}
+	cfg.LLMBaseURL = strings.TrimRight(optional("LLM_BASE_URL", defBaseURL), "/")
+	cfg.LLMModel = optional("LLM_MODEL", defModel)
+	if cfg.LLMBaseURL == "" {
+		missing = append(missing, "LLM_BASE_URL")
+	}
+	if cfg.LLMModel == "" {
+		missing = append(missing, "LLM_MODEL")
+	}
+	switch cfg.LLMReasoningEffort {
+	case "none", "off":
+		cfg.LLMReasoningEffort = ""
+	case "low", "medium", "high", "xhigh":
+	default:
+		return nil, fmt.Errorf("config: LLM_REASONING_EFFORT must be low, medium, high, xhigh or none (got %q)", cfg.LLMReasoningEffort)
 	}
 
 	// Numeric / boolean parsing with validation.

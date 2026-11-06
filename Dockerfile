@@ -17,11 +17,17 @@ FROM alpine:3.19
 
 RUN addgroup -S logai && adduser -S logai -G logai
 
-# CA certs for outbound HTTPS to Anthropic / GitLab / OpenSearch.
+# CA certs for outbound HTTPS to the LLM provider / GitLab / OpenSearch.
 RUN apk add --no-cache ca-certificates
 
 WORKDIR /app
 COPY --from=builder /out/logai /app/logai
+
+# The SQLite DB must live somewhere the non-root user can write. Mount a volume
+# at /app/data to keep it across container restarts.
+RUN mkdir -p /app/data && chown logai:logai /app/data
+ENV DB_PATH=/app/data/logai.db
+VOLUME ["/app/data"]
 
 USER logai
 
